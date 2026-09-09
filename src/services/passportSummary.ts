@@ -13,6 +13,8 @@ type StoredPassportSummary = {
   updatedAt: Timestamp;
 };
 
+const PASSPORT_SUMMARY_VERSION = 2;
+
 const firestore = new Firestore({ projectId: env.GOOGLE_CLOUD_PROJECT });
 const passportUsers = firestore.collection(env.FIRESTORE_PASSPORTS_COLLECTION);
 const ai = new GoogleGenAI({
@@ -24,6 +26,7 @@ const ai = new GoogleGenAI({
 
 function summaryFingerprint(stats: PassportStats): string {
   return createHash('sha256').update(JSON.stringify({
+    summaryVersion: PASSPORT_SUMMARY_VERSION,
     period: stats.period,
     periodLabel: stats.periodLabel,
     totalVisits: stats.totalVisits,
@@ -57,14 +60,27 @@ export function sanitizePassportSummary(value: string, fallback: string): string
     .replace(/[*_#`>]/gu, '')
     .replace(/\s+/gu, ' ')
     .trim();
-  return (cleaned || fallback).slice(0, 180);
+  if (!cleaned || !/[。！？.!?]$/u.test(cleaned)) return fallback;
+  if (cleaned.length <= 180) return cleaned;
+
+  const shortened = cleaned.slice(0, 180);
+  const sentenceEnd = Math.max(
+    shortened.lastIndexOf('。'),
+    shortened.lastIndexOf('！'),
+    shortened.lastIndexOf('？'),
+    shortened.lastIndexOf('.'),
+    shortened.lastIndexOf('!'),
+    shortened.lastIndexOf('?')
+  );
+  return sentenceEnd >= 0 ? shortened.slice(0, sentenceEnd + 1) : fallback;
 }
 
 function summaryPrompt(stats: PassportStats): string {
   return [
     '你是 LINE 咖啡護照的回顧文案助手。',
     '只能使用下方 JSON 中已提供的事實，不得猜測個性、消費、地點或沒有出現的偏好。',
-    '使用繁體中文、第二人稱、溫暖但不誠懇，寫 2 句話，總長度不超過 100 個中文字。',
+    '使用繁體中文、第二人稱、溫暖自然且不浮誇，寫 2 句完整的話，總長度不超過 100 個中文字。',
+    '每句都必須有完整句意，最後一句必須以句號、驚嘆號或問號結束。',
     '不要使用 Markdown、標題或列表。',
     JSON.stringify({
       period: stats.periodLabel,
@@ -109,7 +125,11 @@ export async function getPassportSummary(input: {
     const response = await ai.models.generateContent({
       model: env.GEMINI_PASSPORT_MODEL,
       contents: summaryPrompt(input.stats),
-      config: { temperature: 0.4, maxOutputTokens: 180 }
+      config: {
+        temperature: 0.4,
+        maxOutputTokens: 512,
+        thinkingConfig: { thinkingBudget: 0 }
+      }
     });
     const summary = sanitizePassportSummary(response.text ?? '', fallback);
     try {
